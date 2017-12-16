@@ -158,8 +158,8 @@ String TR064::action(String service, String act, String params[][2], int nParam)
           _realm = xmlTakeParam(xmlR, "Realm");
       }
     } else {
-      Serial.println (soapaction);
-      Serial.println (xml);
+      //Serial.println (soapaction);
+      //Serial.println (xml);
     }
     return xmlR;
 }
@@ -257,26 +257,6 @@ int TR064::getDeviceCount() {
     return -1;
 }
 
-int TR064::getWifiDeviceStatus(int numDev, String* ip, String* mac, int* active) {
-  String req[][2] = {{"NewAssociatedDeviceAuthState", ""}, {"NewAssociatedDeviceMACAddress", ""}, {"NewAssociatedDeviceIPAddress", ""}};
-  String params[][2] = {{"NewAssociatedDeviceIndex", String(numDev)}};
-  String ret;
-  
-  if (_init == 0)
-    return -1;
-  ret = action("WLANConfiguration:1", "GetGenericAssociatedDeviceInfo", params, 1, req, 3);
-  if (ret.length() == 0)
-    return 0;
-
-  *active = (req[0][1]).toInt();
-  if (mac != NULL)
-    *mac = req[1][1];
-  if (ip != NULL)
-    *ip = req[2][1];
-  
-  return 1;
-}
-
 int TR064::getDeviceStatus(int numDev, String* ip, String* name, int* active) {
   String req[][2] = {{"NewActive", ""}, {"NewHostName", ""}, {"NewIPAddress", ""}};
   String params[][2] = {{"NewIndex", String(numDev)}};
@@ -286,12 +266,13 @@ int TR064::getDeviceStatus(int numDev, String* ip, String* name, int* active) {
     return -1;
   ret = action("Hosts:1", "GetGenericHostEntry", params, 1, req, 3);
   if (ret.length() == 0)
-    return 0;
+    return -1;
 
-  *active = (req[0][1]).toInt();
-  if (name != NULL)
+  if (req[0][1].length() > 0)
+	*active = (req[0][1]).toInt();
+  if (name != NULL && req[1][1].length() > 0)
     *name = req[1][1];
-  if (ip != NULL)
+  if (ip != NULL && req[2][1].length() > 0)
     *ip = req[2][1];
   
   return 1;
@@ -303,44 +284,106 @@ int TR064::getDeviceStatus(int numDev, String* ip, String* name, int* active) {
  * return nothing as of yet
  */
 #include <ESP8266WiFi.h>
+/*
+ * all: false - stop at first device found (fast detection)
+ */
+int TR064::getHostDevicesStatus(bool all) {
+	int numDev, i;
+	String ip, name;
+	int active;
+	int overall_active = 0;
 
-int TR064::getDevicesStatus(bool all) {
-  int numDev, i;
-  String ip, name;
-  int active;
-  int overall_active = 0;
+	if (_init == 0)
+		return -1;
+	numDev = getDeviceCount();
+	if (numDev < 1)
+		return numDev;
+	// Query the mac and status of each device
+	for (i = 0; i < numDev; ++i) {
+		if (getDeviceStatus(i, &ip, &name, &active) == -1)
+			return -1;
+		if (ip == _ip)
+			continue;
+		Serial.printf("%d:\t", i);
+		if (active == 1)
+			Serial.print("*");
+		else
+			Serial.print(" ");
+		Serial.print(ip + " [" + name + "]");
+		if (ip == WiFi.localIP().toString())
+			Serial.print (" // me!");
+		else if (active) {
+			overall_active++;
+			if (all == false) {
+				Serial.println ();
+				return 1;
+			}
+		}
+		Serial.println ();
+	}
+
+	return overall_active;
+}
+
+int TR064::getWifiDeviceCount(int wlan) {
+  String params[][2] = {{}};
+  String req[][2] = {{"NewTotalAssociations", ""}};
+  String ret;
+
+  if (_init == 0)
+    return -1;
+  ret = action("WLANConfiguration:" + String(wlan), "GetTotalAssociations",
+      params, 0, req, 1);
+  if (ret.length() > 0)
+    return (req[0][1]).toInt();
+  else
+    return -1;
+}
+
+int TR064::getWifiDeviceStatus(int wlan, int numDev, String* ip, String* mac) {
+  String req[][2] = {{"NewAssociatedDeviceMACAddress", ""}, {"NewAssociatedDeviceIPAddress", ""}};
+  String params[][2] = {{"NewAssociatedDeviceIndex", String(numDev)}};
+  String ret;
   
   if (_init == 0)
     return -1;
-  numDev = getDeviceCount();
-  if (numDev == -1)
-    return -1;
+  ret = action("WLANConfiguration:" + String(wlan), "GetGenericAssociatedDeviceInfo", params, 1, req, 3);
+  if (ret.length() == 0)
+    return 0;
 
-  // Query the mac and status of each device
-  for (i = 0; i < numDev; ++i) {
-    if (getDeviceStatus(i, &ip, &name, &active) == -1)
-      return -1;
-    if (ip == _ip)
-      continue;
-    Serial.printf("%d:\t", i);
-    if (active == 1)
-      Serial.print("*");
-    else
-      Serial.print(" ");
-    Serial.print(ip + " [" + name + "]");
-    if (ip == WiFi.localIP().toString())
-      Serial.print (" // me!");
-    else if (active) {
-      overall_active++;
-      if (all == false) {
-        Serial.println ();
-        return 1;
-      }
-    }
-    Serial.println ();
-  }
+  if (mac != NULL)
+    *mac = req[0][1];
+  if (ip != NULL)
+    *ip = req[1][1];
+  if (*ip == "0.0.0.0")
+    return 0;
+  return 1;
+}
 
-  return overall_active;
+int TR064::getWifiDevicesStatus(bool all) {
+	int wlan, numDev, i;
+	int overall_active = 0;
+	String ip, mac;
+	
+	if (_init == 0)
+		return -1;
+	for (wlan = 1; wlan < 4; ++wlan) {
+		numDev = getWifiDeviceCount(wlan);
+		if (!all && numDev > 0)
+			return numDev;
+		overall_active += numDev;
+		for (i = 0; i < numDev; ++i) {
+			if (getWifiDeviceStatus(wlan, i, &ip, &mac) == -1)
+				return overall_active;
+			if (ip == _ip || ip == "0.0.0.0")
+				continue;
+			Serial.printf("%d:\t", i);
+			Serial.print(ip + " [" + mac + "]");
+			if (ip == WiFi.localIP().toString())
+				Serial.print (" // me!");
+			Serial.println ();
+		}
+	}
 }
 
 /** 

@@ -18,18 +18,20 @@ class TR064
   public:
     TR064(int port, String ip, String user, String pass);
     void init();
+    int getDeviceCount();
+    int getHostDevicesStatus(bool all);
+    int getDeviceStatus(int numDev, String* ip, String* name, int* active);
+    int getWifiDeviceCount(int wlan);
+    int getWifiDeviceStatus(int wlan, int numDev, String* ip, String* mac);
+    int getWifiDevicesStatus(bool all);
+    String getDeviceName(String mac);
+  private:
     String action(String service, String act);
     String action(String service, String act, String params[][2], int nParam);
     String action(String service, String act, String params[][2], int nParam, String (*req)[2], int nReq);
     String xmlTakeParam(String inStr,String needParam);
     String md5String(String s);
     String byte2hex(byte number);
-    int getDeviceCount();
-    int getDevicesStatus(bool all);
-    int getDeviceStatus(int numDev, String* ip, String* name, int* active);
-    int getWifiDeviceStatus(int numDev, String* ip, String* mac, int* active);
-    String getDeviceName(String mac);
-  private:
     int initServiceURLs();
     int initNonce();
     String httpRequest(String url, String xml, String action);

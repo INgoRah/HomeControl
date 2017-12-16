@@ -1,17 +1,28 @@
 /*
-*/
+ * Global switchs
+ */
 #define USE_TR064
+#define NO_FAKE_DEV
+
+/*
+ * Includes
+ */
+#include <time.h>
+#include <sys/time.h>                   // struct timeval
 #include <ESP8266WiFi.h>
+#include "FS.h"
+
+/*
+ * Library classs includes
+ */
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
-/*#include <ESP8266HTTPUpdateServer.h>*/
+#include <WiFiUDP.h>
+#include <ESP8266HTTPUpdateServer.h>
 #include <ESP8266HTTPClient.h>
 #include <UniversalTelegramBot.h>
-#include <time.h>
-#include <EEPROM.h>
-#include <WiFiUDP.h>
 #include <OneWireX.h>
 #include <SysLogger.h>
 #ifdef USE_TR064
@@ -19,11 +30,22 @@
 #else
 #include <ESP8266Ping.h>
 #endif /* USE_TR064 */
-#include "HomeControl.h"
 
+/*
+ * Local Includes
+ */
+#include "HomeControl.h"
+#include "HomeWeb.h"
+#include "HomeConfig.h"
 #include "config.h"
 
-#define NO_FAKE_DEV
+/*
+ * Local constants
+ */
+const char* host = "esp";
+const static char* days[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+/** standard LED, used on breadboard */
+const char led = 2;
 
 /** output for direct connected relais, low active */
 #define PIN_LAMP_RELEAIS 10
@@ -47,6 +69,9 @@
 #define IR_VOLUP 0x5EA158A7
 #define IR_VOLDN 0x5EA1D827
 
+/*
+ * Types
+ */
 enum WifiState {
   ST_ACT,
   // active but no users, so powering down soon
@@ -57,22 +82,6 @@ enum WifiState {
   ST_INACT_CHECK,
 };
 
-const char* host = "esp";
-const static char* days[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-/** standard LED, used on breadboard */
-const char led = 2;
-static int lamp_st = 0;
-static int lamp_sw = 0;
-static unsigned long deadtime = 0;
-static unsigned long active_poll = 0;
-static int sleep_to = SLEEP_TO;
-static WifiState state;
-static String cmdBuf;
-static char presence_det = 1;
-static struct tm* boot_tm;
-int Bot_mtbs = 1000; //mean time between scan messages
-long Bot_lasttime;   //last time messages' scan has been done
-
 class StateLog {
     private:
       int cnt;
@@ -82,94 +91,74 @@ class StateLog {
       } log[20];
 };
 
-StateLog stateLog;
-
+/*
+ * Objects
+ */
 ESP8266WebServer server(80);
 // SSL client needed for both libraries
 WiFiClientSecure client;
-
-//ESP8266HTTPUpdateServer httpUpdater;
+ESP8266HTTPUpdateServer httpUpdater;
 // on pin PIN_OW (a max 4.7K resistor is necessary)
 OneWire  ds(PIN_OW);
 volatile boolean ow_intPeding;
 #ifdef USE_TR064
 TR064 tr64(PORT, fritz_ip, fritz_user, fritz_passwd);
 #endif /* USE_TR064 */
-//IRsend irsend(13); //an IR led is connected to GPIO pin 13
 UniversalTelegramBot bot(BOT_TOKEN, client);
+HomeWeb web;
+HomeConfig cfg;
+StateLog stateLog;
+SysLogger Log;
+
+/*
+ * Local variables
+ */
+static int lamp_st = 0;
+static int lamp_sw = 0;
+static unsigned long deadtime = 0;
+static unsigned long active_poll = 0;
+static int sleep_to = SLEEP_TO;
+static WifiState state;
+static struct tm* boot_tm;
+int Bot_mtbs = 1000; //mean time between scan messages
+long Bot_lasttime;   //last time messages' scan has been done
 
 static byte addr[MAX_SENSORS][8];
 static byte sensors;
+
 /* each switch contains two outputs (0=PowerLine, 1=LED), for temp it contains the 16 temp */
 static union {
   byte temp[2];
   byte sw[2];
 }sensor_data[MAX_SENSORS];
 
-SysLogger Log;
-
-void WriteStringToEEPROM(int adr, String s, size_t size)
+/*
+ * Local functions
+ */
+void ow_interupt(void)
 {
-  uint32_t i;
-
-	for (i = 0; i < s.length() && i < size;i++) {
-			EEPROM.write(adr + i,s[i]);
-	}
-	EEPROM.write(adr + i + 1, 0);
+  ow_intPeding++;
 }
 
-String ReadStringFromEEPROM(int beginaddress)
+
+void CheckFlash()
 {
-	byte counter=0;
-	char rChar;
-	String retString = "";
+    uint32_t realSize = ESP.getFlashChipRealSize();
+    uint32_t ideSize = ESP.getFlashChipSize();
+    FlashMode_t ideMode = ESP.getFlashChipMode();
+#if 0
+    Serial.printf("Flash real id:   %08X\n", ESP.getFlashChipId());
+    Serial.printf("Flash real size: %u\n\n", realSize);
 
-	while (1)
-	{
-		rChar = EEPROM.read(beginaddress + counter);
-		if (rChar == 0 || rChar == 0xff)
-		  break;
-		if (counter > 31) break;
-		counter++;
-		retString.concat(rChar);
-
-	}
-	return retString;
-}
-
-void readConfig() {
-  uint32_t pos = 3;
-
-  EEPROM.begin(512);
-  if (EEPROM.read(0) == 'C' && EEPROM.read(1) == 'F'  && EEPROM.read(2) == 'G') {
-    Serial.print("sid=");
-    Serial.println (ReadStringFromEEPROM(pos));
-    pos +=31;
-    Serial.print(" passwd=");
-    Serial.println (ReadStringFromEEPROM(pos));
-    pos +=31;
-    Serial.print(" det=");
-    Serial.println (ReadStringFromEEPROM(pos++));
-    Serial.print(" x=");
-    Serial.println (ReadStringFromEEPROM(pos++));
-  }
-}
-
-void writeConfig()
-{
-  uint32_t pos = 0;
-
-  Serial.println("Writing Config");
-  EEPROM.write(pos++,'C');
-  EEPROM.write(pos++,'F');
-  EEPROM.write(pos++,'G');
-
-  WriteStringToEEPROM (pos, ssid, 31);
-  pos += 31;
-  WriteStringToEEPROM (pos, password, 31);
-  pos += 31;
-  EEPROM.write(pos++, presence_det);
-  EEPROM.commit();
+    Serial.printf("Flash ide  size: %u\n", ideSize);
+    Serial.printf("Flash ide speed: %u\n", ESP.getFlashChipSpeed());
+    Serial.printf("Flash ide mode:  %s\n", (ideMode == FM_QIO ? "QIO" : ideMode == FM_QOUT ? "QOUT" : ideMode == FM_DIO ? "DIO" : ideMode == FM_DOUT ? "DOUT" : "UNKNOWN"));
+#endif
+    if(ideSize != realSize) {
+        Serial.println("Flash Chip configuration wrong!\n");
+    } else {
+        Serial.println("Flash Chip configuration ok.\n");
+    }
 }
 
 void ow_start(byte sw, byte cmd, byte end)
@@ -191,9 +180,11 @@ void ow_end()
 }
 
 void ow_detect(void) {
-  byte j, i, crc;
+  byte i, crc;
 #ifdef FAKE_DEV
   byte found;
+#else
+  byte j;
 #endif
 
   detachInterrupt(digitalPinToInterrupt(PIN_OW));
@@ -210,19 +201,25 @@ void ow_detect(void) {
     }
     sensors++;
   }
-  if (sensors == 0)
-    Serial.println ("search failed");
 #ifdef FAKE_DEV
-  const uint8_t at_id1[8] = { 0xA3, 0xA2, 0x10, 0x84, 0x00, 0x00, 0x02, 0x27 };
+  const uint8_t at_id1[8] = { 0xA2, 0xA2, 0x10, 0x84, 0x00, 0x00, 0x02, 0x27 };
+  const uint8_t at_id2[8] = { 0xA3, 0xA2, 0x10, 0x84, 0x00, 0x00, 0x02, 0x27 };
+  const uint8_t ds_id1[8] = { 0x28, 0xA2, 0x10, 0x84, 0x00, 0x00, 0x02, 0x27 };
   found = 0;
   for (i = 0; i < sensors; i++)
     if (addr[i][7] == at_id1[7])
       found = 1;
   if (found == 0) {
     memcpy (addr[sensors++], at_id1, 8);
+    memcpy(addr[sensors++], ds_id1, 8);
+    memcpy(addr[sensors++], at_id2, 8);
   }
+#else
+  if (sensors == 0)
+	  Serial.println("search failed");
 #endif
   ow_end();
+#ifndef FAKE_DEV
   // print sensors
   for (j = 0; j < sensors; j++) {
     Serial.print("#");
@@ -234,6 +231,7 @@ void ow_detect(void) {
     }
     Serial.println();
   }
+#endif
 }
 
 #define OW_READ_SCRATCHPAD 0xBE
@@ -281,29 +279,6 @@ void temp_loop(byte state) {
   }
 }
 
-/**
-  sw which ow device idx
-  output which one of the output pins
-  val 0: off, 1: on
-*/
-void sw_exec(byte sw, byte output, byte val)
-{
-  Log.printf ("switching %d #%d = %d\n", sw, output, val);
-  if (output == 0) {
-    if (val == 0)
-      ow_start(sw, 0x47, 1);
-    else
-      ow_start(sw, 0x67, 1);
-  }
-  else {
-    if (val == 0)
-      ow_start(sw, 0x48, 1);
-    else
-      ow_start(sw, 0x68, 1);
-  }
-  sensor_data[sw].sw[output] = val;
-}
-
 #define OW_WRITE_SCRATCHPAD 0x4E
 
 void sw_irSend (byte sw, unsigned long data) {
@@ -334,14 +309,44 @@ void sw_irSend (byte sw, unsigned long data) {
 }
 
 /**
+sw which ow device idx
+output which one of the output pins
+val 0: off, 1: on
+*/
+void sw_exec(byte sw, byte output, byte val)
+{
+  sw = sw / 10 - 1;
+	Log.printf("switching %d #%d = %d\n", sw, output, val);
+	if (addr[sw][0] == 0xA3) {
+		sw_irSend(2, IR_ONOFF);
+		return;
+	}
+	if (output == 0) {
+		if (val == 0)
+			ow_start(sw, 0x47, 1);
+		else
+			ow_start(sw, 0x67, 1);
+	}
+	else {
+		if (val == 0)
+			ow_start(sw, 0x48, 1);
+		else
+			ow_start(sw, 0x68, 1);
+	}
+	sensor_data[sw].sw[output] = val;
+}
+
+/**
   val 0: off, 1: on
 */
 void sw_lamp (byte val) {
   Log.printf ("lamp sw: %d to %d\n", lamp_sw, val);
   digitalWrite(PIN_LAMP_RELEAIS, !val);
   lamp_sw = val;
-  if (lamp_sw)
+  /*
+  if (lamp_sw && cfg.telegram)
     bot.sendMessage(CHAT_ID, "Licht Küchentisch an!", "Markdown");
+  */
 }
 
 void handleTemp() {
@@ -354,32 +359,7 @@ void handleTemp() {
     temp_loop(1);
 }
 
-static char temp[500];
-
-/**
- * label Text on the button
- * id HTML tag id
- * url URL or suburl to call incl. parameters. It starts with sw=
- */
-void web_addButton(String& content, const char* label, const char* color, const char* url)
-{
-    content += String ("<div class=\"w3-row\"><div class=\"w3-col w3-container\">");
-    content += String ("<p class=\"w3-text-black\">\
-      <a class=\"w3-btn w3-round-large w3-");
-    snprintf (temp, sizeof(temp),"%s\" href='?sw=%s'", color, url);
-    content += String (temp);
-    snprintf(temp, sizeof(temp), " >%s</a></p>", label);
-    content += String (temp);
-    /* end of row and of container */
-    content += String ("</div></div>");
-}
-
 void web_evalArgs() {
-  if (server.arg("ir") != ""){
-    int ir = server.arg("ir").toInt();
-    Serial.println(ir);
-    sw_irSend(2, ir);
-  }
   if (server.arg("p") != ""){
     int p, f;
     p = server.arg("p").toInt();
@@ -405,46 +385,110 @@ void web_evalArgs() {
       break;
     }
   }
-  if (server.arg("sw") != ""){
-    int sw, out = -1;
-
+  if (server.arg("query") != ""){
+    int sw;
+    
     sw = server.arg("sw").toInt();
-    if (server.arg("out") != "")
-       out = atoi(server.arg("out").c_str());
-    if (server.arg("on") != "") {
-      byte val = atoi(server.arg("on").c_str());
-      if (sw >= 100) {
-        sw_lamp(val);
-      } else
-        sw_exec(sw, out, val);
+    Log.println (server.arg("query"));
+    if (server.arg("query") == "ir") {
+      int ir = server.arg("on").toInt();
+      Serial.println(ir);
+      sw_irSend(2, ir);
     }
+    if (server.arg("query") == "sw") {
+        int out = 0;
+    
+        if (server.arg("out") != "")
+           out = atoi(server.arg("out").c_str());
+        if (server.arg("on") != "") {
+          byte val = atoi(server.arg("on").c_str());
+          if (sw < 10)
+            sw_lamp(val);
+          else
+            sw_exec(sw, 0, val);
+        }
+     }
   }
 }
 
 void http_redirect () {
-  server.send ( 200, "text/html", "<html><head><meta http-equiv='refresh' content='0;index.html'/></head></html>");
+	server.send(200, "text/html", "<html><head></head><body>nothing</body></html>");
+	//server.send ( 200, "text/html", "<html><head><meta http-equiv='refresh' content='0;index.html'/></head></html>");
 }
 
 void handleConfig() {
   String content;
-
-  content = String(web_header);
-  snprintf(temp, sizeof(temp), "<div id=\"config\" class=\"w3-container\">");
-  content += String (temp);
-  content += R"=====(<form class="w3-container" action="cfg" method="POST">
-    <p>Password <input class="w3-text" name="passwd" type="text"></p>
-    <p><input class="w3-checkbox" name="presence" type="checkbox")=====";
-  if (presence_det == 1)
-    content += " checked";
-  content += R"=====(>Presence Detection</p>
-    <p align="right"><input type="submit" value="Apply" class="w3-btn w3-round-large w3-small w3-blue-grey" type="button"></p>
-    </form>)=====";
-  content +=  "</div>";
-  content += R"====(<footer class="w3-container w3-theme w3-margin-top w3-teal">
-    | <a href="refresh"> Refresh </a> |
-    </footer></div></div></body></html>)====";
-
+  web.handleConfig(cfg.presence, cfg.telegram, content);
   server.send (200, "text/html", content.c_str());
+}
+
+void statusUpdate(String& content)
+{
+	struct tm* tm;
+	time_t now;
+	int j;
+
+	now = time(nullptr);
+	tm = localtime(&now);
+	/*
+	*{"time":"21:36:29","alarms":6,"devices":-1,"switches":3,"switch":[{"id":"1","val":1},{"id":"10","val":1},{"id":"20","val":0}]}
+	content += "{ \"time\" : " + String(tm->tm_hour) + ":" + String(tm->tm_min) + ":" + String(tm->tm_sec) ;
+	*/
+  content += "{ \"time\" : \"" + String(tm->tm_hour) + ":" + String(tm->tm_min) + ":" + String(tm->tm_sec) + "\"";
+  content += ", \"alarms\" : " + String(ow_intPeding++);
+  content += ", \"devices\" : " + String(1);
+  content += ", \"sensor\" : [ ";
+  int i = 0;
+  for (j = 0; j < sensors; j++) {
+	  if (addr[j][0] == 0x28) {
+		  if (i++ > 0)
+			  content += ",";
+
+		  content += " { \"id\" : " + String((j + 1) * 10) +
+			  ", \"val\" : \"" + String(sensor_data[j].temp[0]) +
+			  "." + sensor_data[j].temp[1] + " C \"} ";
+	  }
+  }
+  content += " ]";
+  content += ", \"switch\" : [ ";
+  content += "{ \"id\" : \"1\", \"val\" : " + String(lamp_sw) + " } ";
+  for (j = 0; j < sensors; j++) {
+	  if (addr[j][0] == 0xA2 || addr[j][0] == 0xA3)
+		  content += ", { \"id\" : " + String((j+1) * 10) + ", \"val\" : " + String(sensor_data[j].sw[0]) + " } ";
+  }
+  content += " ] }\n\n";
+}
+
+void handleStatusUpdate(bool event) {
+  String content;
+  
+  if (event) {
+    //content = " event: status \n";
+    content += "data: ";
+  }
+  statusUpdate(content);
+  if (event)
+    server.send(200, "text/event-stream", content.c_str());
+  else
+    server.send(200, "text/plain", content.c_str());
+}
+
+void handleStatus() {
+  handleStatusUpdate(1);
+}
+
+void telegramWelcome()
+{
+  String message;
+  message = "OW Web server up and running, IP: ";
+  IPAddress ip = WiFi.localIP();
+  message += ip.toString();
+  message.concat("\n");
+  if(bot.sendMessage(CHAT_ID, message, "Markdown")){
+    Serial.println("TELEGRAM Successfully sent");
+  } else
+    Serial.println("TELEGRAM sending failed");
+  delay(1);
 }
 
 void handleConfigPost() {
@@ -453,27 +497,33 @@ void handleConfigPost() {
   if (server.args() > 0 ) { // Are there any POST/GET Fields ?
      Serial.println ("Args=" + server.args());
      for (uint8_t i = 0; i < server.args(); i++ ) {  // Iterate through the fields
+          if (server.argName(i) == "telegram") {
+            if (server.arg(i) == "on") {
+              cfg.telegram = 1;
+              telegramWelcome();
+            } else {
+              cfg.telegram = 0;
+            }
+          }
           if (server.argName(i) == "presence") {
             if (server.arg(i) == "on") {
-              presence_det = 1;
+              cfg.presence = 1;
               tr64.init();
-              tr64.getDevicesStatus(true);
+              tr64.getWifiDevicesStatus(true);
             } else {
-              presence_det = 0;
+              cfg.presence = 0;
             }
           }
       }
   }
 #if 1
-  //strcat (response, MYFOOTER);
-  //server.send (200, "text/html", response);
   IPAddress ip(192,168,178,25);
   Log.init(ip);
   /*
   Log.println ("syslog init done");
   */
 #endif
-  writeConfig();
+  cfg.writeConfig();
   handleIdx();
 }
 
@@ -485,21 +535,15 @@ void handleSensorPost() {
 }
 
 void handleSensors() {
+#if 0
+  static char temp[500];
   char id [8*3+1];
   int i, j;
   byte data[8];
   int cmd = 0x67;
   String content;
 
-  content = String(web_header);
-  content += String(R"=====(
-    <div id="main">
-    <div class="w3-main" style="margin-left:10px">
-    <header class="w3-container w3-teal">
-    <a class="w3-opennav w3-xlarge w3-hide-large" href="index.html"><i class="fa fa-home btn"></i> Home </a></span>
-    </header>
-    )=====");
-
+  web.startPage(content, 0);
   if (server.args() > 0 ) { // Are there any POST/GET Fields ?
     int sw = (byte)server.arg("id").toInt();
     /*data = server.arg("data").toInt();*/
@@ -512,7 +556,7 @@ void handleSensors() {
     }
   }
   // sensors
-  content += String ("<div id=\"sensors\" class=\"w3-container\">");
+  web.startSection(content, "sensors");
   for (j = 0; j < sensors; j++) {
     content += String ("<div class=\"w3-row\"><div class=\"w3-col w3-container\">");
     snprintf (temp, sizeof(temp),"<p>#%d (", j);
@@ -524,9 +568,9 @@ void handleSensors() {
     }
     content += String (id);
     content += ") ";
-    content += String (R"====(<form class="w3-container" action="sensor" method="POST">)====");
+    content += R"====(<form class="w3-container" action="sensor" method="POST">)====";
     snprintf (temp, sizeof(temp), "<input type='hidden' value='%d' name='id'>", j);
-    content += String (temp);
+    content += temp;
     ow_read(j, data, 8);
     for (i = 0; i < 8; ++i) {
       snprintf (temp, sizeof(temp)," %02X", data[i]);
@@ -543,110 +587,120 @@ void handleSensors() {
   }
   /* end of sensors */
   content += String ("</div><!--sensors-->");
-  content += String (R"====(<footer class="w3-container w3-theme w3-margin-top w3-teal">
-    | <a href="refresh"> Refresh </a> |
-    </footer></div></div></body></html>)====");
+  web.endPage(content);
   server.send (200, "text/html", content.c_str());
+#else
+	http_redirect();
+#endif
 }
 
 void handleIdx() {
-  int i, j;
-  static char url[32];
-  static char name[32];
-
-  String content;
-
-  content = String(web_header);
-  content += String(web_nav);
-  content += String(web_main);
-
-  web_evalArgs();
-  /*  struct tm* tm;
-  time_t now;
-  now = time(nullptr);
-  tm = localtime(&now);
-  snprintf (temp, sizeof(temp), "<p>%02d:%02d:%02d %s</p>", tm->tm_hour, tm->tm_min, tm->tm_sec, days[tm->tm_wday]);
-  strcat (response, temp);
-  */
-#if 1
-  // kitchen
-  content += "<div id=\"kueche\" class=\"w3-container\">";
-  if (lamp_sw)
-    web_addButton(content, "Tisch", "yellow", "100&on=0");
-  else
-    web_addButton(content, "Tisch", "khaki", "100&on=1");
-  i = 0;
-  for (j = 0; j < sensors; j++) {
-    if (addr[j][0] == 0xA2) {
-      snprintf(name, sizeof(name), "Licht %d", j);
-
-      if (sensor_data[j].sw[i]) {
-        snprintf (url, sizeof(url),"%d&out=%d&on=0", j, i);
-        web_addButton(content, name, "yellow", url);
-      } else {
-        snprintf (url, sizeof(url),"%d&out=%d&on=1", j, i);
-        web_addButton(content, name, "khaki", url);
-      }
-    }
-    if (addr[j][0] == 0x28) {
-      content += "<div class=\"w3-row\"><div class=\"w3-col w3-container\">";
-      content += "<h4 class=\"w3-text-red\">";
-      snprintf (temp, sizeof(temp)," %d.%d C", sensor_data[j].temp[0], sensor_data[j].temp[1]);
-      content += String(temp);
-      /* end of row and of container */
-      content += "</h4></div></div>";
-    }
+	int i, j;
+	static char url[32];
+	static char name[32];
+	String content, data;
+	
+	statusUpdate(data);
+	web.startPage(content, data);
+	web.startSection (content,"kueche");
+	web.addButton(content, "Tisch", 2, "1");
+	i = 0;
+	for (j = 0; j < sensors; j++) {
+		if (addr[j][0] == 0xA2) {
+			snprintf(name, sizeof(name), "Licht %d", j + 1);
+			snprintf(url, sizeof(url), "%d", (j+1)*10 + i);
+			web.addButton(content, name, 2, url);
+    		}
+		if (addr[j][0] == 0x28) {
+      			content += "<div class=\"w3-row\"><div class=\"w3-col w3-container\">";
+			content += "<h4 class=\"w3-text-red\" id=\"" + String((j + 1) * 10)  + "\">";
+			content += String(sensor_data[j].temp[0]) + "." + sensor_data[j].temp[1] + " C";
+      			/* end of row and of container */
+      			content += "</h4></div></div>";
+    		}
   }
   /* end of room */
-  content += "</div>";
-#endif
-  snprintf(temp, sizeof(temp), "<div id=\"wohnzimmer\" class=\"w3-container\">");
-  content += String(temp);
-  content += "</div><!--wohnzimmer-->";
+	web.endSection(content);
+	web.startSection(content, "wohnzimmer");
+	web.endSection(content);
   for (j = 0; j < sensors; j++) {
     if (addr[j][0] == 0xA3) {
-      snprintf(temp, sizeof(temp), "<div id=\"media\" class=\"w3-container\">");
-      content += String(temp);
-      snprintf (url, sizeof(url),"%d&ir=%d", j, IR_ONOFF);
-      if (sensor_data[j].sw[0])
-          web_addButton(content, "Music", "yellow", url);
-      else
-          web_addButton(content, "Music", "khaki", url);
-      snprintf (url, sizeof(url),"%d&ir=%d", j, IR_VOLUP);
-      web_addButton(content, "Up", "khaki", url);
-      snprintf (url, sizeof(url),"%d&ir=%d", j, IR_VOLDN);
-      web_addButton(content, "Dn", "khaki", url);
+      content += "<div id=\"media\" class=\"w3-container\">";
+			snprintf (url, sizeof(url),"%d", (j + 1) * 10);
+			web.addButton(content, "Music", 2, url);
+      snprintf (url, sizeof(url),"%d.%d", j, IR_VOLUP);
+      web.addButton(content, "Up", 0, url);
+      snprintf (url, sizeof(url),"%d.%d", j, IR_VOLDN);
+      web.addButton(content, "Dn", 0, url);
       content += "</div><!--media-->";
     }
   }
+#if 0    
   /* status */
   content += "<div id=\"devices\" class=\"w3-container\">";
   content += "<div class=\"w3-panel w3-teal\">Active Devices</div>";
-#if 1
-  int numDev;
-  String ip, n;
+
+  if (server.arg("devs") != "") {
+	  int numDev;
+	  String ip, n;
+	  int active;
+	  numDev = tr64.getDeviceCount();
+	  for (j = 0; j < numDev; j++) {
+	    tr64.getDeviceStatus(j, &ip, &n, &active);
+	    if (active && !(ip == WiFi.localIP().toString())) {
+	      snprintf (temp, sizeof(temp), "%s (%s)<br/>", n.c_str(), ip.c_str());
+	      content += temp;
+	    }
+	  }
+  } else {
+    content += String("deactivated");
+	  for (j = 0; j < active_devs; j++) {
+	      snprintf (temp, sizeof(temp), "%s (%s)<br/>", devs_ip[j].toString().c_str());
+	      content += String(temp);
+	  }
+  }
+  content += "</div><!--devs-->";
+#endif
+	web.endPage(content, ow_intPeding);
+	server.send(200, "text/html", content.c_str());
+}
+
+void handleAction() {
+  String data;
+  
+  Serial.println ("handle action");
+  if (server.args() > 0 ) { // Are there any POST/GET Fields ?
+    web_evalArgs();
+  }
+  statusUpdate(data);
+  server.send(200, "text/html", data.c_str());
+}
+
+void handleWifi() {
+  int i, wlan, numDev;
+  String ip, n, mac;
   int active;
-  numDev = tr64.getDeviceCount();
-  for (j = 0; j < numDev; j++) {
-    tr64.getDeviceStatus(j, &ip, &n, &active);
-    if (active && !(ip == WiFi.localIP().toString())) {
-      snprintf (temp, sizeof(temp), "%s (%s)<br/>", n.c_str(), ip.c_str());
-      content += String(temp);
+  String content;
+  
+  tr64.init();
+  content.reserve(0x500);
+  web.startPage(content);
+  content += "<div id=\"devices\" class=\"w3-container\">";
+  content += "<div class=\"w3-panel w3-teal\">Active Devices</div>";
+  for (wlan = 1; wlan < 4; ++wlan) {
+    numDev = tr64.getWifiDeviceCount(wlan);
+    for (i = 0; i < numDev; ++i) {
+      if (tr64.getWifiDeviceStatus(wlan, i, &ip, &mac) == -1)
+        break;
+        if (ip == WiFi.localIP().toString() || ip == "0.0.0.0")
+          continue;
+      content += tr64.getDeviceName(mac);
+      //content += n;
+      content += " (" + ip + ")<br/>\n";
     }
   }
-#else
-  for (j = 0; j < active_devs; j++) {
-      snprintf (temp, sizeof(temp), "%s (%s)<br/>", devs_ip[j].toString().c_str());
-      content += String(temp);
-  }
-#endif
-  content += "</div><!--devs-->";
-  content += String(R"=====(<footer class="w3-container w3-theme w3-margin-top w3-teal">
-  | <a href="refresh"> Refresh </a> | )=====");
-  snprintf(temp, sizeof(temp), "up since %02d:%02d %s | Alarms %d\n", boot_tm->tm_hour, boot_tm->tm_min, days[boot_tm->tm_wday], ow_intPeding);
-  content += String(temp);
-  content += String("</footer></div></div></body></html>");
-
+  content += "</div></div>";
+  web.endPage(content, ow_intPeding);
   server.send (200, "text/html", content.c_str());
 }
 
@@ -663,7 +717,7 @@ void wifi_connect(char en, int wait) {
   if (WiFi.status() == WL_CONNECTED)
     return;
 
-  WiFi.begin(ssid, password);
+  WiFi.begin(cfg.ssid, cfg.password); 
   if (wait != 0) {
     Log.print ("connecting");
     Serial.flush();
@@ -709,20 +763,22 @@ void powerDown() {
     }
   }
   sw_lamp(0);
-  delay(1000);
+  delay(500);
   wifi_connect(0, 0);
-  Log.println ("Powered down!");
+  //Log.println ("Powered down!");
 }
 
 void setState (WifiState s) {
   Log.printf ("state %d -> %d\n", state, s);
   switch (s) {
     case  ST_INACT_FORCE:
-      bot.sendMessage(CHAT_ID, "going to sleep", "Markdown");
+      if (cfg.telegram)
+        bot.sendMessage(CHAT_ID, "going to sleep", "Markdown");
       deadtime = millis();
       break;
     case ST_ACT_SLEEP:
-      bot.sendMessage(CHAT_ID, "users gond, wait for sleep", "Markdown");
+      if (cfg.telegram)
+        bot.sendMessage(CHAT_ID, "users gond, wait for sleep", "Markdown");
       sleep_to = SLEEP_TO;
       active_poll = millis();
       break;
@@ -736,10 +792,42 @@ void setState (WifiState s) {
   state = s;
 }
 
+void handleFlash()
+{
+  CheckFlash();
+  // Start filing subsystem
+  if (SPIFFS.begin()) {
+      Serial.println("SPIFFS Active");
+      if (SPIFFS.exists("script.js")) {
+        File f = SPIFFS.open("script.js", "r");
+        if (!f)
+          Serial.println("Unable To Open");
+        else {
+          String s;
+          Serial.println("file opened");
+#if 1
+          while (f.position() < f.size())
+          {
+            s=f.readStringUntil('\n');
+            s.trim();
+            Serial.println(s);
+          }
+#endif
+          f.close();
+        }
+      }
+  } else {
+      Serial.println("Unable to activate SPIFFS");
+  }
+  http_redirect();
+}
+
 void webSetup() {
   server.on("/", handleIdx);
   server.on("/config", handleConfig);
+  server.on("/status", handleStatus);
   server.on("/cfg", HTTP_POST, handleConfigPost);
+  server.on("/action", HTTP_POST, handleAction);
   server.on("/sensor", HTTP_POST, handleSensorPost);
   server.on("/sensors", handleSensors);
   server.on("/index.html", handleIdx);
@@ -757,35 +845,47 @@ void webSetup() {
       powerDown();
       setState (ST_INACT_FORCE);
   } );
-  server.on ( "/reset", []() {
-      ESP.restart();
-  } );
-  server.on("/wifi", []() {
+  server.on("/flash", handleFlash);
 #ifdef USE_TR064
-    tr64.init();
-    tr64.getDevicesStatus(true);
-    http_redirect();
+  server.on("/wifi", handleWifi);
 #endif
-  } );
   server.on ( "/script.js", []() {
     server.send ( 200, "text/plain", web_script_js );
   } );
-  server.begin();
+  httpUpdater.setup(&server);
+  web.init(&server);
 }
 
-void ow_interupt(void)
+#define TZ              1       // (utc+) TZ in hours
+#define DST_MN          0      // use 60mn for summer time in some countries
+#define TZ_SEC          ((TZ)*3600)
+#define DST_SEC         ((DST_MN)*60)
+void timeSetup()
 {
-  ow_intPeding++;
+  timeval tv;
+  timespec tp;  
+  time_t now;
+
+  configTime(TZ_SEC, DST_SEC, "pool.ntp.org");
+  Serial.println("Waiting for time");
+  unsigned timeout = 2000;
+  unsigned start = millis();
+  while (millis() - start < timeout) {
+      now = time(nullptr);
+      if (now > (2016 - 1970) * 365 * 24 * 3600)
+          break;
+      delay(25);
+  }
+  boot_tm = localtime(&now);
+  Serial.printf ("%02d:%02d:%02d %s\n", boot_tm->tm_hour, boot_tm->tm_min, boot_tm->tm_sec, days[boot_tm->tm_wday]);
 }
 
 void setup(void){
-  time_t now;
-  String message;
   
   Serial.begin(115200);
-  Serial.println("\n\nstarting up...");
+  Serial.printf("\n\nstarting up... %s\n", __TIME__);
   delay (10);
-  readConfig();
+  cfg.readConfig();
   WiFi.mode(WIFI_STA);
   delay (10);
   // connecting....timout 5 mins
@@ -803,63 +903,27 @@ void setup(void){
   digitalWrite(PIN_LAMP_RELEAIS, HIGH);
   delay (10);
   lamp_st = digitalRead(PIN_LAMP_SW);
-
-  configTime(1 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+  timeSetup();
   ow_detect ();
   ow_intPeding = 0;
   attachInterrupt(digitalPinToInterrupt(PIN_OW), ow_interupt, LOW);
-  Serial.println("Waiting for time");
-  unsigned timeout = 2000;
-  unsigned start = millis();
-  while (millis() - start < timeout) {
-      now = time(nullptr);
-      if (now > (2016 - 1970) * 365 * 24 * 3600)
-          break;
-      delay(25);
-  }
-  boot_tm = localtime(&now);
-  Serial.printf ("%02d:%02d:%02d %s\n", boot_tm->tm_hour, boot_tm->tm_min, boot_tm->tm_sec, days[boot_tm->tm_wday]);
   state = ST_ACT;
-  if (presence_det == 1) {
+  if (cfg.presence == 1) {
     tr64.init();
-    tr64.getDevicesStatus(true);
+    tr64.getWifiDevicesStatus(true);
   }
-  message.concat("OW Web server up and running, IP: ");
-  IPAddress ip = WiFi.localIP();
-  message.concat(ip.toString());
-  message.concat("\n");
-  if(bot.sendMessage(CHAT_ID, message, "Markdown")){
-    Serial.println("TELEGRAM Successfully sent");
-  } else
-    Serial.println("TELEGRAM sending failed");
-}
-
-/*
-  SerialEvent occurs whenever a new data comes in the
- hardware serial RX.  This routine is run between each
- time loop() runs, so using delay inside loop can delay
- response.  Multiple bytes of data may be available.
- */
-void serialEvent() {
-  while (Serial.available()) {
-    // get the new byte:
-    char inChar = (char)Serial.read();
-    // if the incoming character is a newline, set a flag
-    // so the main loop can do something about it:
-    if (inChar == '\n') {
-      Serial.println (cmdBuf);
-      cmdBuf = "";
-    }
-    else
-      // add it to the inputString:
-      cmdBuf += inChar;
-
-  }
+  delay(1000);
+  if (cfg.telegram)
+    telegramWelcome();
+  Bot_lasttime = millis();
 }
 
 int getDevicesStatus() {
 #ifdef USE_TR064
-  return tr64.getDevicesStatus(false);
+  if (cfg.presence == 1)
+     return tr64.getWifiDevicesStatus(false);
+  else
+    return 1;
 #else
   int i, j;
   int devs = 0;
@@ -879,8 +943,8 @@ int getDevicesStatus() {
 }
 
 void handleNewMessages(int numNewMessages) {
-  Serial.println("handleNewMessages");
-  Serial.println(String(numNewMessages));
+  //Serial.println("handleNewMessages");
+  //Serial.println(String(numNewMessages));
 
   for (int i=0; i<numNewMessages; i++) {
     String chat_id = String(bot.messages[i].chat_id);
@@ -888,9 +952,9 @@ void handleNewMessages(int numNewMessages) {
 
     String from_name = bot.messages[i].from_name;
     if (from_name == "") from_name = "Guest";
-    Serial.println(text);
+    //Serial.println(text);
 
-    if (text == "licht") {
+    if (text == "Licht") {
         bot.sendChatAction(chat_id, "typing");
         sw_lamp(1);
         // You can't use own message, just choose from one of bellow
@@ -906,6 +970,8 @@ void handleNewMessages(int numNewMessages) {
 }
 
 void botLoop() {
+  if (cfg.telegram == 0)
+    return;
   if (millis() > Bot_lasttime + Bot_mtbs)  {
     int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
 
@@ -936,6 +1002,7 @@ void loop(void){
       wifi_connect(1, 1000);
       setState (ST_ACT);
     }
+    handleStatusUpdate(1);
   }
   botLoop();
   switch (state) {
@@ -1038,6 +1105,7 @@ void loop(void){
       status_poll = millis();
       Log.printf("state %d\n", state);
       handleTemp();
+      handleStatusUpdate(1);
   }
   if (millis() - alarm_to >= 1000) {
     alarm_to = millis();
