@@ -6,11 +6,13 @@
   Created by René Vollmer, November 2016
 */
 #include <ESP8266HTTPClient.h>
+#include <MD5Builder.h>
+#include <WString.h>
 #include "tr064.h"
 #define STATIC_SERVICE_LIST
 
 #define arr_len(x)  (sizeof(x) / sizeof(*x))
-#define _requestStart "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+#define _requestStart 
 #define DETECT_PAGE "/tr64desc.xml"
 
 //Do not construct this unless you have a working connection to the device!
@@ -27,7 +29,7 @@ TR064::TR064(int port, String ip, String user, String pass)
   ...
   <controlURL>/upnp/control/wlanconfig1</controlURL>\
   */
-  String s[][2] = {
+  const String s[][2] = {
       { "WLANConfiguration:1", "/upnp/control/wlanconfig1" },
       { "WLANConfiguration:2", "/upnp/control/wlanconfig2" },
       { "WLANConfiguration:3", "/upnp/control/wlanconfig3" },
@@ -37,7 +39,7 @@ TR064::TR064(int port, String ip, String user, String pass)
       { "WANIPConnection:1", "/upnp/control/wanipconnection1" }
    };
    int i;
-   for (i = 0; i < 6; ++i) {
+   for (i = 0; i < MAX_SERVICES; ++i) {
       _services[i][0] = s[i][0];
       _services[i][1] = s[i][1];
     }
@@ -50,7 +52,7 @@ void TR064::init() {
     return;
   //Get the initial nonce and the realm
   initNonce();
-    //Now we have everything to generate out hased secret.
+  //Now we have everything to generate out hased secret.
   //Serial.println("Your secret is is: " + _user + ":" + _realm + ":" + _pass);
   _secretH = md5String(_user + ":" + _realm + ":" + _pass);
   //Serial.println("TR64: Your secret is hashed: " + _secretH);
@@ -92,10 +94,20 @@ int TR064::initServiceURLs() {
 
 //Fetches the initial nonce and the realm
 int TR064::initNonce() {
+#if 0
+	int port;
     //Serial.print("Geting the initial nonce and realm\n");
+    String s[][2] = { { "NewSecurityPort", "1" } };
+    String xmlR = action("DeviceInfo:1", "/upnp/control/deviceinfo", "GetSecurityPort", s, 1);
+    if (xmlR.length() > 0) {
+       String body = xmlTakeParam(xmlR, "s:Body");
+       port = xmlTakeParam(body, "NewSecurityPort").toInt();
+    }
+#endif
     String a[][2] = {{"NewAssociatedDeviceIndex", "1"}};
-    if (action("WLANConfiguration:1", "GetGenericAssociatedDeviceInfo", a, 1).length() > 0)
-      return 0;
+    if (action("WLANConfiguration:1", "GetGenericAssociatedDeviceInfo", a, 1).length() > 0) {
+	return 0;
+    }
     Serial.println ("TR64: Nonce get failed");
     return -1;
     //Serial.print("TR64: Got the initial nonce: " + _nonce + " and the realm: " + _realm + "\n");
@@ -120,7 +132,6 @@ String TR064::generateAuthToken() {
     return token;
 }
 
-
 //This function will call an action on the service.
 String TR064::action(String service, String act) {
     //Serial.println("action_2");
@@ -128,40 +139,47 @@ String TR064::action(String service, String act) {
     return action(service, act, p, 0);
 }
 
+String TR064::action(String service, String url, String act, String params[][2], int nParam) {
+	String xml = PSTR("<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">");
+	xml += generateAuthXML() + "<s:Body><u:" + act + " xmlns:u='urn:dslforum-org:service:" + service + "'>";
+	//add request-parameters to xml
+	if (nParam > 0) {
+		for (int i = 0; i<nParam; ++i)
+			if (params[i][0] != "")
+				xml += "<" + params[i][0] + ">" + params[i][1] + "</" + params[i][0] + ">";
+	}
+	//close the envelop
+	xml += "</u:" + act + "></s:Body></s:Envelope>";
+	//The SOAPACTION-header is in the format service#action
+	String soapaction = "urn:dslforum-org:service:" + service + "#" + act;
+
+	//Send the http-Request
+	String xmlR = httpRequest(url, xml, soapaction);
+	//Extract the Nonce for the next action/authToken.
+	if (xmlR != "") {
+		if (xmlTakeParam(xmlR, "Nonce") != "") {
+			_nonce = xmlTakeParam(xmlR, "Nonce");
+		}
+		if (_realm == "" && xmlTakeParam(xmlR, "Realm") != "") {
+			_realm = xmlTakeParam(xmlR, "Realm");
+		}
+	}
+	else {
+		//Serial.println (soapaction);
+		//Serial.println (xml);
+	}
+	return xmlR;
+}
+
 //This function will call an action on the service.
 //With params you set the arguments for the action
 //e.g. String params[][2] = {{ "arg1", "value1" }, { "arg2", "value2" }};
 String TR064::action(String service, String act, String params[][2], int nParam) {
+    String url;
+    url = findServiceURL(service);
     //Serial.println("action_1");
     //Generate the xml-envelop
-    String xml = _requestStart;
-    xml += generateAuthXML() + "<s:Body><u:"+act+" xmlns:u='urn:dslforum-org:service:" + service + "'>";
-    //add request-parameters to xml
-    if (nParam > 0) {
-        for (int i=0;i<nParam;++i)
-          if (params[i][0] != "")
-                xml += "<"+params[i][0]+">"+params[i][1]+"</"+params[i][0]+">";
-    }
-    //close the envelop
-    xml += "</u:" + act + "></s:Body></s:Envelope>";
-    //The SOAPACTION-header is in the format service#action
-    String soapaction = "urn:dslforum-org:service:" + service+"#"+act;
-
-    //Send the http-Request
-    String xmlR = httpRequest(findServiceURL(service), xml, soapaction);
-    //Extract the Nonce for the next action/authToken.
-    if (xmlR != "") {
-      if (xmlTakeParam(xmlR, "Nonce") != "") {
-          _nonce = xmlTakeParam(xmlR, "Nonce");
-      }
-      if (_realm == "" && xmlTakeParam(xmlR, "Realm") != "") {
-          _realm = xmlTakeParam(xmlR, "Realm");
-      }
-    } else {
-      //Serial.println (soapaction);
-      //Serial.println (xml);
-    }
-    return xmlR;
+    return action(service, url, act, params, nParam);
 }
 
 //This function will call an action on the service.
@@ -173,8 +191,14 @@ String TR064::action(String service, String act, String params[][2], int nParam)
 String TR064::action(String service, String act, String params[][2], int nParam, String (*req)[2], int nReq) {
     //Serial.println("action_3");
     String xmlR = action(service, act, params, nParam);
+    if (xmlR.length() <= 0)
+	    return "";
     String body = xmlTakeParam(xmlR, "s:Body");
-
+    int err = xmlTakeParam(body, "errorCode").toInt();
+    if (err != 0) {
+	    Serial.print ("Error: ");
+	    Serial.println (err);
+    }
     if (xmlR.length() > 0 && nReq > 0) {
         for (int i=0;i<nReq;++i) {
             if (req[i][0] != "") {
@@ -206,7 +230,7 @@ String TR064::httpRequest(String url, String xml, String soapaction) {
 
     http.begin(_ip, _port, url);
     if (soapaction != "") {
-      http.addHeader("CONTENT-TYPE", "text/xml"); //; charset=\"utf-8\"
+      http.addHeader(F("CONTENT-TYPE"), F("text/xml")); //; charset=\"utf-8\"
       http.addHeader("SOAPACTION", soapaction);
     }
     //http.setAuthorization(fuser.c_str(), fpass.c_str());
@@ -257,7 +281,9 @@ int TR064::getDeviceCount() {
     return -1;
 }
 
-int TR064::getDeviceStatus(int numDev, String* ip, String* name, int* active) {
+int TR064::getDeviceStatus(int numDev, String* ip, String* name, int* active) 
+{
+#ifdef HOST_DEVICES
   String req[][2] = {{"NewActive", ""}, {"NewHostName", ""}, {"NewIPAddress", ""}};
   String params[][2] = {{"NewIndex", String(numDev)}};
   String ret;
@@ -274,7 +300,7 @@ int TR064::getDeviceStatus(int numDev, String* ip, String* name, int* active) {
     *name = req[1][1];
   if (ip != NULL && req[2][1].length() > 0)
     *ip = req[2][1];
-  
+#endif /* HOST_DEVICES */  
   return 1;
 }
 
@@ -288,6 +314,7 @@ int TR064::getDeviceStatus(int numDev, String* ip, String* name, int* active) {
  * all: false - stop at first device found (fast detection)
  */
 int TR064::getHostDevicesStatus(bool all) {
+#ifdef HOST_DEVICES
 	int numDev, i;
 	String ip, name;
 	int active;
@@ -323,6 +350,9 @@ int TR064::getHostDevicesStatus(bool all) {
 	}
 
 	return overall_active;
+#else
+	return -1;
+#endif /* HOST_DEVICES */
 }
 
 int TR064::getWifiDeviceCount(int wlan) {
@@ -332,6 +362,23 @@ int TR064::getWifiDeviceCount(int wlan) {
 
   if (_init == 0)
     return -1;
+  /* Example of the call sequence....to be optimized
+  0x4020c04e: HTTPClient::POST(String) at esp8266\libraries\ESP8266HTTPClient\src/ESP8266HTTPClient.cpp line 179
+  0x40205200: TR064::httpRequest(String, String, String) at tr064.cpp line 282
+  0x4020dba5: String::copy(char const*, unsigned int) at esp8266\cores\esp8266/WString.cpp line 746
+  0x4020dca8: String::operator=(String const&) at esp8266\cores\esp8266/WString.cpp line 746
+  0x40205721: TR064::action(String, String, String, String (*) [2], int) at tr064.cpp line 282
+  0x4020dba5: String::copy(char const*, unsigned int) at esp8266\cores\esp8266/WString.cpp line 746
+  0x4020dca8: String::operator=(String const&) at esp8266\cores\esp8266/WString.cpp line 746
+  0x40205928: TR064::action(String, String, String (*) [2], int) at tr064.cpp line 282
+  0x4020dca8: String::operator=(String const&) at esp8266\cores\esp8266/WString.cpp line 746
+  0x40205aaf: TR064::action(String, String, String (*) [2], int, String (*) [2], int) at tr064.cpp line 282
+  0x4020db27: String::changeBuffer(unsigned int) at esp8266\cores\esp8266/WString.cpp line 746
+  0x4020db73: String::reserve(unsigned int) at esp8266\cores\esp8266/WString.cpp line 746
+  0x4020dba5: String::copy(char const*, unsigned int) at esp8266\cores\esp8266/WString.cpp line 746
+  0x4020dbf2: String::String(char const*) at esp8266\cores\esp8266/WString.cpp line 746
+  0x40205c78: TR064::getWifiDeviceCount(int) at tr064.cpp line 366
+  */
   ret = action("WLANConfiguration:" + String(wlan), "GetTotalAssociations",
       params, 0, req, 1);
   if (ret.length() > 0)
@@ -347,34 +394,41 @@ int TR064::getWifiDeviceStatus(int wlan, int numDev, String* ip, String* mac) {
   
   if (_init == 0)
     return -1;
-  ret = action("WLANConfiguration:" + String(wlan), "GetGenericAssociatedDeviceInfo", params, 1, req, 3);
+  ret = action("WLANConfiguration:" + String(wlan),
+	  "GetGenericAssociatedDeviceInfo", params, 1, req, 2);
   if (ret.length() == 0)
     return 0;
 
-  if (mac != NULL)
+  if (mac != NULL && req[0][1].length() > 0)
     *mac = req[0][1];
-  if (ip != NULL)
+  if (ip != NULL && req[1][1].length() > 0)
     *ip = req[1][1];
   if (*ip == "0.0.0.0")
     return 0;
   return 1;
 }
 
+#define MAX_WLAN 3
 int TR064::getWifiDevicesStatus(bool all) {
-	int wlan, numDev, i;
+	int wlan, numDev[MAX_WLAN], i, ret;
 	int overall_active = 0;
 	String ip, mac;
 	
 	if (_init == 0)
 		return -1;
-	for (wlan = 1; wlan < 4; ++wlan) {
-		numDev = getWifiDeviceCount(wlan);
-		if (!all && numDev > 0)
-			return numDev;
-		overall_active += numDev;
-		for (i = 0; i < numDev; ++i) {
-			if (getWifiDeviceStatus(wlan, i, &ip, &mac) == -1)
-				return overall_active;
+	for (wlan = 0; wlan < MAX_WLAN; ++wlan) {
+		ret = getWifiDeviceCount(wlan + 1);
+		if (ret == -1)
+			return -1;
+		numDev[wlan] = ret;
+		overall_active += ret;
+	}
+	if (!all)
+		return overall_active;
+	for (wlan = 0; wlan < MAX_WLAN; ++wlan) {
+		for (i = 0; i < numDev[wlan]; ++i) {
+			if (getWifiDeviceStatus(wlan+1, i, &ip, &mac) == -1)
+				break;
 			if (ip == _ip || ip == "0.0.0.0")
 				continue;
 			Serial.printf("%d:\t", i);
@@ -384,6 +438,7 @@ int TR064::getWifiDevicesStatus(bool all) {
 			Serial.println ();
 		}
 	}
+	return overall_active - 1;
 }
 
 /** 

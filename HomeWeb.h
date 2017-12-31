@@ -4,21 +4,28 @@
 #include <Arduino.h>
 #include <ESP8266WebServer.h>
 
+class HomeConfig;
+
 class HomeWeb {
 	private:
-		ESP8266WebServer* _server;
+		void _sendHeader(const bool form, const bool active, int size);
+		void _sendFooter(const bool form, const bool active);
 	protected:
+		ESP8266WebServer * _server;
 	public:
 		HomeWeb() { ; }
-		int init (ESP8266WebServer* server);
-		void startPage(String& content);
-		void startPage(String& content, String data);
-		void endPage(String& content, int ow_intPeding);
+		void setup(ESP8266WebServer *server);
+
 		void startSection(String& content, const char* title);
 		void endSection(String& content);
 		void addButton (String& content, const char* label,
 			int val, const char* url);
-		void handleConfig (int presence_det, int telegram, String& content);
+		void sendPage_P(const String &name, PGM_P content,
+			bool form = true, bool active = true);
+		void sendPage(const String &name, const String& content,
+			bool form = true, bool active = true);
+		void handleConfig(HomeConfig &cfg);
+		void sendSensorsPage(String& content);
 };
 
 #endif
