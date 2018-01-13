@@ -37,37 +37,41 @@ String HomeConfig::ReadStringFromEEPROM(int beginaddress)
 
 void HomeConfig::readConfig() {
 	uint32_t pos = 0;
+	String s;
 
 	EEPROM.begin(512);
 	if (EEPROM.read(pos++) == 'C' && EEPROM.read(pos++) == 'F'  && EEPROM.read(pos++) == 'G') {
-		Serial.print("sid=");
-		Serial.println (ReadStringFromEEPROM(pos));
-		pos += 31;
-		Serial.print(" passwd=");
-		Serial.println(ReadStringFromEEPROM(pos));
-		pos += 31;
+		Serial.println ();
+		Serial.println (F("Reading config"));
+		Serial.print("  SID=");
+		s = ReadStringFromEEPROM(pos);
+		Serial.println (s);
+		pos += 32;
+		Serial.print("  passwd=");
+		s = ReadStringFromEEPROM(pos);
+		//password = s.c_str();
+		Serial.println(s);
+		pos += 32;
 		presence = EEPROM.read(pos++);
-		Serial.printf(" det=%d\n", presence);
-		presence = 0;
+		Serial.printf("  presense=%d\n", presence);
 		telegram = EEPROM.read(pos++);
-		Serial.printf("telegram=%d\n", telegram);
+		Serial.printf("  telegram=%d\n", telegram);
 	}
-	telegram = 0;
 }
 
 void HomeConfig::writeConfig()
 {
 	uint32_t pos = 0;
 
-	Serial.println("Writing Config");
+	Serial.println(F("Writing Config"));
 	EEPROM.write(pos++, 'C');
 	EEPROM.write(pos++, 'F');
 	EEPROM.write(pos++, 'G');
 
 	WriteStringToEEPROM(pos, ssid, 31);
-	pos += 31;
+	pos += 32;
 	WriteStringToEEPROM(pos, password, 31);
-	pos += 31;
+	pos += 32;
 	EEPROM.write(pos++, presence);
 	EEPROM.write(pos++, telegram);
 	EEPROM.commit();

@@ -1,0 +1,1 @@
+D:\Projects\Arduino\HomeControl>D:\tools\Arduino\hardware\esp8266com\esp8266\tools\xtensa-lx106-elf\bin\xtensa-lx106-elf-size.exe -A HomeControl.ino.elf > mem.txt

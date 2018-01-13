@@ -12,7 +12,7 @@
 
 //#define USE_SERIAL Serial
 #include "Arduino.h"
-#define MAX_SERVICES 6
+#define MAX_SERVICES 7
 class TR064
 {
   public:
@@ -29,6 +29,8 @@ class TR064
     String action(String service, String act);
     String action(String service, String act, String params[][2], int nParam);
     String action(String service, String act, String params[][2], int nParam, String (*req)[2], int nReq);
+    String action(String service, String url, String act, String params[][2], int nParam);
+
     String xmlTakeParam(String inStr,String needParam);
     String md5String(String s);
     String byte2hex(byte number);

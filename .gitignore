@@ -1,3 +1,6 @@
+*.bin
+*.elf
+*.pdf
 .DS_Store
 *.esproj
 /html
